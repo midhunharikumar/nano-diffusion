@@ -8,3 +8,5 @@ wandb
 Pillow
 tqdm
 torchmetrics[image]
+transformers
+accelerate

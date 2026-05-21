@@ -32,3 +32,10 @@ run_name: cifar10-smoke
 
 # device: mps (Apple Silicon), cuda, or cpu
 device: mps
+
+# semantic routing — arxiv 2602.03510
+# set use_semantic_routing: true and pick an llm_model_name to enable
+# the LLM is frozen; only the DepthwiseRouter weights + cross-attn are trained
+use_semantic_routing: false
+# llm_model_name: google/gemma-3-1b      # gemma3:270m equivalent on HuggingFace
+# llm_model_name: Qwen/Qwen3-0.6B        # qwen3.5:0.8b equivalent on HuggingFace

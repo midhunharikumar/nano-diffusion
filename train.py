@@ -41,14 +41,19 @@ def sigmoid_weight(t):
     return s * (1 - s)
 
 
-def compute_loss(model, x0, labels, cfg_dropout: float):
+def compute_loss(model, x0, labels, cfg_dropout: float, texts=None):
     null = model.cls_embed.num_embeddings - 1
     drop = torch.rand(len(labels), device=labels.device) < cfg_dropout
-    labels = labels.masked_fill(drop, null)
+    labels_in = labels.masked_fill(drop, null)
+
+    # For semantic routing: drop texts to None on the same mask (unconditional)
+    texts_in = None
+    if texts is not None:
+        texts_in = [("" if d.item() else t) for t, d in zip(texts, drop)]
 
     t       = torch.rand(len(x0), device=x0.device)
     zt      = get_zt(x0, t)
-    x0_pred = model(zt, t, labels)
+    x0_pred = model(zt, t, labels_in, texts=texts_in)
 
     w = sigmoid_weight(t).view(-1, 1, 1, 1)
     return (w * (x0_pred - x0).pow(2)).mean()
@@ -96,10 +101,13 @@ def main():
     )
 
     # model + EMA
+    use_routing = getattr(cfg, "use_semantic_routing", False)
     model = DiT(
         img_size=cfg.img_size, patch_size=cfg.patch_size,
         channels=cfg.channels, num_classes=cfg.num_classes,
         d=cfg.hidden_dim, depth=cfg.depth, heads=cfg.num_heads,
+        use_semantic_routing=use_routing,
+        llm_model_name=getattr(cfg, "llm_model_name", None),
     ).to(device)
     ema = make_ema(model)
     print(f"parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
@@ -125,12 +133,19 @@ def main():
                       config=OmegaConf.to_container(cfg, resolve=True))
     step = 0
 
+    # class index → text description lookup (only used when routing is on)
+    class_texts = None
+    if use_routing:
+        from routing import CLASS_TEXTS
+        class_texts = CLASS_TEXTS[cfg.dataset]
+
     for epoch in range(cfg.epochs):
         model.train()
         for x, labels in loader:
             x, labels = x.to(device), labels.to(device)
 
-            loss = compute_loss(model, x, labels, cfg.cfg_dropout)
+            texts = [class_texts[i] for i in labels.tolist()] if class_texts else None
+            loss = compute_loss(model, x, labels, cfg.cfg_dropout, texts=texts)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
