@@ -1,0 +1,10 @@
+torch>=2.1.0
+torchvision
+datasets
+huggingface_hub
+einops
+omegaconf
+wandb
+Pillow
+tqdm
+torchmetrics[image]
