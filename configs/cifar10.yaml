@@ -39,3 +39,6 @@ device: mps
 use_semantic_routing: false
 # llm_model_name: google/gemma-3-1b      # gemma3:270m equivalent on HuggingFace
 # llm_model_name: Qwen/Qwen3-0.6B        # qwen3.5:0.8b equivalent on HuggingFace
+
+# gradient checkpointing — 0=off, 1=every block (~33% overhead), 2=every other (~17% overhead)
+checkpoint_every: 0

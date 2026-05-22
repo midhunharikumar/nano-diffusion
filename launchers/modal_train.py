@@ -16,8 +16,9 @@ Download checkpoints after run:
     modal volume get nano-diffusion-checkpoints . ./checkpoints
 """
 
-import modal
 from pathlib import Path
+
+import modal
 
 ROOT = Path(__file__).parent.parent
 
@@ -29,13 +30,21 @@ app = modal.App("nano-diffusion")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch", "torchvision",
+        "torch",
+        "torchvision",
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        "datasets", "huggingface_hub", "einops",
-        "omegaconf", "wandb", "Pillow", "tqdm",
+        "datasets",
+        "huggingface_hub",
+        "einops",
+        "omegaconf",
+        "wandb",
+        "Pillow",
+        "tqdm",
         "torchmetrics[image]",
+        "transformers",
+        "accelerate",
     )
     # add_local_dir syncs at run time (no image rebuild needed on code changes)
     .add_local_dir(
@@ -48,8 +57,10 @@ image = (
 # ---------------------------------------------------------------------------
 # Volumes  (persist across runs)
 # ---------------------------------------------------------------------------
-checkpoints_vol = modal.Volume.from_name("nano-diffusion-checkpoints", create_if_missing=True)
-hf_cache_vol    = modal.Volume.from_name("nano-diffusion-hf-cache",    create_if_missing=True)
+checkpoints_vol = modal.Volume.from_name(
+    "nano-diffusion-checkpoints", create_if_missing=True
+)
+hf_cache_vol = modal.Volume.from_name("nano-diffusion-hf-cache", create_if_missing=True)
 
 
 # ---------------------------------------------------------------------------
@@ -58,15 +69,20 @@ hf_cache_vol    = modal.Volume.from_name("nano-diffusion-hf-cache",    create_if
 @app.function(
     image=image,
     gpu="A100",
-    timeout=60 * 60 * 12,   # 12 h — adjust to your run budget
+    timeout=60 * 60 * 12,  # 12 h — adjust to your run budget
     volumes={
-        "/checkpoints":             checkpoints_vol,
+        "/checkpoints": checkpoints_vol,
         "/root/.cache/huggingface": hf_cache_vol,
     },
-    secrets=[modal.Secret.from_name("wandb-secret")],
+    secrets=[
+        modal.Secret.from_name("wandb-secret"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
 )
-def train(dataset: str = "cifar10", overrides: list[str] = []):
-    import os, subprocess, sys
+def train(dataset: str = "cifar10", run_name: str = "", overrides: list[str] = []):
+    import os
+    import subprocess
+    import sys
 
     os.chdir("/app")
 
@@ -74,10 +90,13 @@ def train(dataset: str = "cifar10", overrides: list[str] = []):
     if not os.path.exists("checkpoints"):
         os.symlink("/checkpoints", "checkpoints")
 
-    cmd = [sys.executable, "train.py", f"configs/{dataset}.yaml", "device=cuda"] + overrides
+    cmd = [sys.executable, "train.py", f"configs/{dataset}.yaml", "device=cuda"]
+    if run_name:
+        cmd += ["--run_name", run_name]
+    cmd += overrides
     subprocess.run(cmd, check=True)
 
-    checkpoints_vol.commit()   # flush volume writes before container exits
+    checkpoints_vol.commit()  # flush volume writes before container exits
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +104,12 @@ def train(dataset: str = "cifar10", overrides: list[str] = []):
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
 def main(
-    dataset:  str = "cifar10",
-    overrides: str = "",   # comma-separated dotlist, e.g. "hidden_dim=512,epochs=200"
+    dataset: str = "cifar10",
+    run_name: str = "",  # base name; UUID suffix is appended automatically
+    overrides: str = "",  # comma-separated dotlist, e.g. "hidden_dim=512,epochs=200"
 ):
     train.remote(
         dataset=dataset,
+        run_name=run_name,
         overrides=[o.strip() for o in overrides.split(",") if o.strip()],
     )

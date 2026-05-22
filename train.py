@@ -9,6 +9,7 @@ import copy
 import math
 import argparse
 import os
+import uuid
 from pathlib import Path
 
 import torch
@@ -85,10 +86,19 @@ def update_ema(ema, model, decay: float, step: int):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to YAML config")
+    parser.add_argument("--run_name", default=None, help="Override run name (UUID suffix always appended)")
     args, overrides = parser.parse_known_args()
 
     cfg = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_dotlist(overrides))
+
+    base_name = args.run_name or cfg.run_name
+    run_name  = f"{base_name}_{uuid.uuid4().hex[:8]}"
     print(OmegaConf.to_yaml(cfg))
+    print(f"run: {run_name}\n")
+
+    # TF32 — free ~10% speedup on Ampere+ (A100, RTX 30xx+); no-op on other hardware
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32       = True
 
     device = torch.device(cfg.device)
     Path("checkpoints").mkdir(exist_ok=True)
@@ -108,6 +118,7 @@ def main():
         d=cfg.hidden_dim, depth=cfg.depth, heads=cfg.num_heads,
         use_semantic_routing=use_routing,
         llm_model_name=getattr(cfg, "llm_model_name", None),
+        checkpoint_every=getattr(cfg, "checkpoint_every", 0),
     ).to(device)
     ema = make_ema(model)
     print(f"parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
@@ -129,7 +140,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
     os.environ.setdefault("WANDB_SILENT", "true")
-    run  = wandb.init(project=cfg.wandb_project, name=cfg.run_name,
+    run  = wandb.init(project=cfg.wandb_project, name=run_name,
                       config=OmegaConf.to_container(cfg, resolve=True))
     step = 0
 
@@ -145,7 +156,9 @@ def main():
             x, labels = x.to(device), labels.to(device)
 
             texts = [class_texts[i] for i in labels.tolist()] if class_texts else None
-            loss = compute_loss(model, x, labels, cfg.cfg_dropout, texts=texts)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                                enabled=(device.type in ("cuda", "cpu"))):
+                loss = compute_loss(model, x, labels, cfg.cfg_dropout, texts=texts)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -162,7 +175,7 @@ def main():
                     {"model": model.state_dict(), "ema": ema.state_dict(),
                      "opt": opt.state_dict(), "step": step,
                      "cfg": OmegaConf.to_container(cfg, resolve=True)},
-                    f"checkpoints/{cfg.run_name}_step{step:07d}.pt",
+                    f"checkpoints/{run_name}_step{step:07d}.pt",
                 )
 
         print(f"epoch {epoch + 1}/{cfg.epochs}  step {step}  loss {loss.item():.4f}")

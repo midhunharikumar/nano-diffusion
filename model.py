@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNorm(nn.Module):
@@ -125,6 +126,7 @@ class DiT(nn.Module):
         # semantic routing
         use_semantic_routing: bool = False,
         llm_model_name:       str  = None,
+        checkpoint_every:     int  = 0,   # 0=off, 1=all blocks, N=every Nth block
     ):
         super().__init__()
         self.img_size   = img_size
@@ -132,6 +134,7 @@ class DiT(nn.Module):
         self.channels   = channels
         self.depth      = depth
         self.use_semantic_routing = use_semantic_routing
+        self.checkpoint_every     = checkpoint_every
         n_patches = (img_size // patch_size) ** 2
         patch_dim = channels * patch_size * patch_size
 
@@ -187,8 +190,11 @@ class DiT(nn.Module):
         else:
             contexts = [None] * self.depth
 
-        for blk, ctx in zip(self.blocks, contexts):
-            x = blk(x, cond, context=ctx)
+        for i, (blk, ctx) in enumerate(zip(self.blocks, contexts)):
+            if self.checkpoint_every > 0 and i % self.checkpoint_every == 0 and self.training:
+                x = checkpoint(blk, x, cond, ctx, use_reentrant=False)
+            else:
+                x = blk(x, cond, context=ctx)
 
         x = self.out(self.norm_out(x))
         h = w = self.img_size // p

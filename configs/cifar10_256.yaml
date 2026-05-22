@@ -1,0 +1,39 @@
+dataset: cifar10
+img_size: 256
+channels: 3
+num_classes: 10
+
+# model — patch_size=8 → 1024 tokens (manageable on H100)
+patch_size: 8
+hidden_dim: 512
+depth: 12
+num_heads: 8
+
+# training
+batch_size: 64
+epochs: 200
+lr: 1e-4
+ema_decay: 0.9999
+grad_clip: 1.0
+cfg_dropout: 0.1
+num_workers: 0
+
+# checkpoint every other block — saves ~50% activation memory, ~17% compute overhead
+checkpoint_every: 2
+
+# eval / sampling
+eval_interval: 500
+n_sample_steps: 50
+cfg_scale: 3.0
+n_per_class: 8
+fid_every_n_epochs: 5
+fid_samples: 2048
+
+# logging
+wandb_project: nano-diffusion
+run_name: cifar10-256
+
+# device
+device: cuda
+
+use_semantic_routing: false
