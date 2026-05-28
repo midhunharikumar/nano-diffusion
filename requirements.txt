@@ -1,7 +1,9 @@
 torch>=2.1.0
 torchvision
-datasets
+datasets>=2.20.0
+pyarrow>=14.0.0
 huggingface_hub
+hf-transfer
 einops
 omegaconf
 wandb
@@ -10,3 +12,4 @@ tqdm
 torchmetrics[image]
 transformers
 accelerate
+google-cloud-storage

@@ -14,13 +14,15 @@ from omegaconf import OmegaConf
 
 from data import ImageDataset
 from model import DiT
-from sample import sample as diffusion_sample
+from data import _CFGS
+from sample import sample as diffusion_sample, sample_with_reg
 
 
 @torch.no_grad()
 def compute_fid(model, cfg, device, n_samples: int = 2048) -> float:
     """Generate n_samples images and compute FID against the test split."""
-    test_ds = ImageDataset(cfg.dataset, split="test", img_size=cfg.img_size)
+    eval_split = _CFGS.get(cfg.dataset, {}).get("eval_split", "test")
+    test_ds = ImageDataset(cfg.dataset, split=eval_split, img_size=cfg.img_size)
 
     # Inception v3 has known issues on MPS; run FID stats on CUDA or CPU
     fid_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,10 +48,11 @@ def compute_fid(model, cfg, device, n_samples: int = 2048) -> float:
         torch.arange(cfg.num_classes)
         .repeat((n_samples + cfg.num_classes - 1) // cfg.num_classes)[:n_samples]
     )
+    sampler = sample_with_reg if getattr(model, "use_reg", False) else diffusion_sample
     n_gen = 0
     while n_gen < n_samples:
         batch_labels = labels_all[n_gen : n_gen + 128]
-        imgs = diffusion_sample(model, batch_labels, cfg.n_sample_steps, cfg.cfg_scale, device)
+        imgs = sampler(model, batch_labels, cfg.n_sample_steps, cfg.cfg_scale, device)
         imgs = ((imgs + 1) / 2).clamp(0, 1).cpu()
         if imgs.shape[1] == 1:
             imgs = imgs.repeat(1, 3, 1, 1)
@@ -73,12 +76,26 @@ if __name__ == "__main__":
     parser.add_argument("--n_samples", type=int, default=2048)
     args = parser.parse_args()
 
-    cfg    = OmegaConf.load(args.config)
-    device = torch.device(cfg.device)
-    model  = DiT(
+    cfg     = OmegaConf.load(args.config)
+    device  = torch.device(cfg.device)
+    use_reg = getattr(cfg, "use_reg", False)
+    model   = DiT(
         img_size=cfg.img_size, patch_size=cfg.patch_size,
         channels=cfg.channels, num_classes=cfg.num_classes,
         d=cfg.hidden_dim, depth=cfg.depth, heads=cfg.num_heads,
+        use_reg=use_reg,
+        reg_model_name=getattr(cfg, "reg_model_name", "facebook/dinov2-base"),
+        use_tread=getattr(cfg, "use_tread", False),
+        tread_selection_rate=getattr(cfg, "tread_selection_rate", 0.5),
+        tread_route_start=getattr(cfg, "tread_route_start", 2),
+        tread_route_end=getattr(cfg, "tread_route_end", -1),
+        use_maskgit=getattr(cfg, "use_maskgit", False),
+        maskgit_ratio=getattr(cfg, "maskgit_ratio", 0.5),
+        use_moe=getattr(cfg, "use_moe", False),
+        moe_num_experts=getattr(cfg, "moe_num_experts", 8),
+        moe_num_always_on=getattr(cfg, "moe_num_always_on", 1),
+        moe_capacity_factor=getattr(cfg, "moe_capacity_factor", 1.25),
+        moe_every_n=getattr(cfg, "moe_every_n", 1),
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)

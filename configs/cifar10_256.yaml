@@ -1,25 +1,28 @@
 dataset: cifar10
+streaming: false
 img_size: 256
 channels: 3
 num_classes: 10
 
 # model — patch_size=8 → 1024 tokens (manageable on H100)
 patch_size: 8
-hidden_dim: 512
+hidden_dim: 768
 depth: 12
 num_heads: 8
 
 # training
 batch_size: 64
-epochs: 200
+grad_accum_steps: 4 # effective batch = batch_size × grad_accum_steps
+shifted_t: true # resolution-shifted logit-normal timesteps (arxiv 2301.11093)
+epochs: 100
 lr: 1e-4
 ema_decay: 0.9999
 grad_clip: 1.0
 cfg_dropout: 0.1
-num_workers: 0
+num_workers: 4
 
 # checkpoint every other block — saves ~50% activation memory, ~17% compute overhead
-checkpoint_every: 2
+checkpoint_every: 1
 
 # eval / sampling
 eval_interval: 500
@@ -37,3 +40,25 @@ run_name: cifar10-256
 device: cuda
 
 use_semantic_routing: false
+
+# REG — arxiv 2507.01467
+use_reg: true
+# reg_model_name: facebook/dinov2-base
+reg_beta: 0.03
+
+# TREAD: token routing for training efficiency (compvis/tread)
+# depth=12: blocks 2-8 see 50% of tokens; last 3 blocks see full sequence
+use_tread: false
+tread_selection_rate: 0.5
+tread_route_start: 2
+tread_route_end: 8
+
+# MaskGIT-style token dropout — removes patch tokens from the entire forward pass
+use_maskgit: false
+maskgit_ratio: 0.5
+
+# GCS checkpoint upload (leave empty to disable)
+gcp_bucket: ""
+
+# torch.compile — disable if Triton/gcc fails on the target machine
+compile: false
