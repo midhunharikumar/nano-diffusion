@@ -5,6 +5,12 @@ __pycache__/
 checkpoints/
 wandb/
 .env
+*.env
+credentials.json
+*-credentials.json
+service-account*.json
+*.pem
+*.key
 *.egg-info/
 dist/
 .DS_Store
