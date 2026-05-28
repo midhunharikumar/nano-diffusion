@@ -10,6 +10,14 @@ wandb
 Pillow
 tqdm
 torchmetrics[image]
-transformers
-accelerate
+# transformers + its full torch backend.
+# The [torch] extra pulls tokenizers, safetensors, and accelerate at compatible
+# versions; without it, torchmetrics' eager text-submodule import crashes with
+# `Could not import module 'AutoModel'`.
+transformers[torch]>=4.46.0
+tokenizers>=0.20.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf>=3.20.0
+accelerate>=0.34.0
 google-cloud-storage
