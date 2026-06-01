@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from tqdm import tqdm
-from data import _CFGS, ImageDataset, StreamingImageDataset
+from data import _CFGS, CachedImageDataset, ImageDataset, StreamingImageDataset
 from eval import compute_fid
 from gcs import GCSCheckpointUploader
 from model import DiT
@@ -211,13 +211,34 @@ def main():
 
     # data — streaming skips the full download; map-style caches locally
     streaming = getattr(cfg, "streaming", False)
+    cache_file = getattr(cfg, "cache_file", "")
     nw = cfg.num_workers
-    if streaming:
+    if cache_file:
+        # Pre-resized uint8 RAM cache → GPU-bound training (see cache_data.py).
+        # Built once before the run timer starts; persisted on the volume thereafter.
+        if not os.path.exists(cache_file):
+            from cache_data import build_cache
+
+            build_cache(
+                cfg.dataset, cfg.img_size,
+                getattr(cfg, "cache_shards", 8), cache_file,
+                getattr(cfg, "cache_images", 0),
+            )
+        dataset = CachedImageDataset(cache_file)
+        loader = DataLoader(
+            dataset, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=nw, pin_memory=(cfg.device != "cpu"), drop_last=True,
+            persistent_workers=(nw > 0),
+        )
+        epoch_len = len(loader)
+        print(f"cached dataset: {len(dataset)} images, {epoch_len} batches/epoch")
+    elif streaming:
         dataset = StreamingImageDataset(cfg.dataset, img_size=cfg.img_size)
         loader = DataLoader(
             dataset, batch_size=cfg.batch_size, shuffle=False,
             num_workers=nw, pin_memory=False, drop_last=True,
-            persistent_workers=(nw > 0),
+            persistent_workers=False,   # HF streaming workers can't be safely persisted;
+            prefetch_factor=2 if nw > 0 else None,  # keep next batch ready
         )
         ds_size = _CFGS[cfg.dataset].get("size")
         epoch_len = getattr(
@@ -358,9 +379,11 @@ def main():
             update_ema(ema, model, cfg.ema_decay, step)
             step += 1
 
-            # runtime limit — compute FID, save checkpoint, and exit cleanly
+            # runtime limit — sample, compute FID, save checkpoint, and exit cleanly
             if args.max_runtime and (time.time() - t_start) >= args.max_runtime:
-                print(f"  max_runtime {args.max_runtime}s reached at step {step} — computing FID")
+                print(f"  max_runtime {args.max_runtime}s reached at step {step} — sampling")
+                log_samples(ema, cfg, device, step, run)
+                print(f"  computing FID")
                 fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples)
                 run.log({"fid": fid}, step=step)
                 print(f"  FID: {fid:.2f}")
@@ -429,6 +452,30 @@ def main():
             )
             if gcs:
                 gcs.upload(ckpt_path)
+
+    # Final eval — always run at the end of training if the last epoch didn't
+    # already trigger a scheduled FID (i.e. epochs % fid_every_n_epochs != 0)
+    is_final_epoch = cfg.epochs % cfg.fid_every_n_epochs != 0
+    if is_final_epoch:
+        print("→ final eval")
+        log_samples(ema, cfg, device, step, run)
+        fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples)
+        run.log({"fid": fid}, step=step)
+        print(f"  FID: {fid:.2f}")
+        ckpt_path = f"checkpoints/{run_name}_step{step:07d}_fid{fid:.2f}_final.pt"
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "ema": ema.state_dict(),
+                "opt": opt.state_dict(),
+                "step": step,
+                "fid": fid,
+                "cfg": OmegaConf.to_container(cfg, resolve=True),
+            },
+            ckpt_path,
+        )
+        if gcs:
+            gcs.upload(ckpt_path)
 
     run.finish()
 
