@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from tqdm import tqdm
-from data import _CFGS, CachedImageDataset, ImageDataset, StreamingImageDataset
+from data import _CFGS, ImageDataset, StreamingImageDataset
 from eval import compute_fid
 from gcs import GCSCheckpointUploader
 from model import DiT
@@ -211,28 +211,8 @@ def main():
 
     # data — streaming skips the full download; map-style caches locally
     streaming = getattr(cfg, "streaming", False)
-    cache_file = getattr(cfg, "cache_file", "")
     nw = cfg.num_workers
-    if cache_file:
-        # Pre-resized uint8 RAM cache → GPU-bound training (see cache_data.py).
-        # Built once before the run timer starts; persisted on the volume thereafter.
-        if not os.path.exists(cache_file):
-            from cache_data import build_cache
-
-            build_cache(
-                cfg.dataset, cfg.img_size,
-                getattr(cfg, "cache_shards", 8), cache_file,
-                getattr(cfg, "cache_images", 0),
-            )
-        dataset = CachedImageDataset(cache_file)
-        loader = DataLoader(
-            dataset, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=nw, pin_memory=(cfg.device != "cpu"), drop_last=True,
-            persistent_workers=(nw > 0),
-        )
-        epoch_len = len(loader)
-        print(f"cached dataset: {len(dataset)} images, {epoch_len} batches/epoch")
-    elif streaming:
+    if streaming:
         dataset = StreamingImageDataset(cfg.dataset, img_size=cfg.img_size)
         loader = DataLoader(
             dataset, batch_size=cfg.batch_size, shuffle=False,

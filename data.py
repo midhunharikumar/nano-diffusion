@@ -31,10 +31,15 @@ _CFGS = {
     "imagenet_256x256": dict(hf="benjamin-paine/imagenet-1k-256x256", img_key="image",
                              lbl_key="label", channels=3,
                              eval_split="validation", size=1281167),
+    # native 64×64 repack (Lanczos) — same 1.28M images but ~16× less stream bandwidth
+    # than downloading 256px and resizing, so streaming keeps the GPU fed at 64px.
+    "imagenet_64x64": dict(hf="benjamin-paine/imagenet-1k-64x64", img_key="image",
+                           lbl_key="label", channels=3,
+                           eval_split="validation", size=1281167),
 }
 # Resolution-specific aliases that map to the same HF dataset.
 # Allows `prepare_data.py imagenet64` to work when DATASET matches the config filename.
-_CFGS["imagenet64"]  = _CFGS["imagenet_256x256"]
+_CFGS["imagenet64"]  = _CFGS["imagenet_64x64"]
 _CFGS["imagenet256"] = _CFGS["imagenet_256x256"]
 
 
@@ -65,27 +70,6 @@ class ImageDataset(Dataset):
     def __getitem__(self, i):
         item = self.ds[i]
         return self.transform(item[self.img_key]), item[self.lbl_key]
-
-
-class CachedImageDataset(Dataset):
-    """Map-style dataset backed by a pre-resized uint8 tensor cache (see cache_data.py).
-
-    Images live in RAM as uint8 [0,255]; __getitem__ normalizes to [-1,1] to match
-    the ToTensor+Normalize([0.5],[0.5]) pipeline used elsewhere. Reading is a pure
-    RAM op, so training is GPU-bound rather than network-bound.
-    """
-
-    def __init__(self, cache_file: str):
-        blob = torch.load(cache_file, map_location="cpu", weights_only=True)
-        self.images = blob["images"]   # uint8 (N, C, H, W)
-        self.labels = blob["labels"]   # long  (N,)
-
-    def __len__(self):
-        return self.images.shape[0]
-
-    def __getitem__(self, i):
-        img = self.images[i].float().div_(127.5).sub_(1.0)  # [0,255] → [-1,1]
-        return img, int(self.labels[i])
 
 
 class StreamingImageDataset(torch.utils.data.IterableDataset):

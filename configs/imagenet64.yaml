@@ -1,4 +1,6 @@
-dataset: imagenet_256x256
+# native 64×64 ImageNet (full 1.28M images) — streaming it is ~16× cheaper than
+# downloading 256px and resizing, so we keep full dataset diversity AND fast throughput.
+dataset: imagenet_64x64
 streaming: true
 img_size: 64
 channels: 3
@@ -10,9 +12,8 @@ hidden_dim: 512
 depth: 16
 num_heads: 8
 
-# training — tuned for fast convergence in fixed 600s H100 runs (FID 465→106).
-# Small batch (more optimizer steps) + high LR + no grad-checkpointing, all enabled
-# by the in-RAM pre-resized cache below which makes training GPU-bound (see cache_data.py).
+# training — tuned for fast convergence in fixed 600s H100 runs.
+# Small batch (more optimizer steps) + high LR + no grad-checkpointing.
 batch_size: 256
 grad_accum_steps: 1 # effective batch = batch_size × grad_accum_steps
 epochs: 50
@@ -21,22 +22,14 @@ warmup_steps: 100
 ema_decay: 0.9999
 grad_clip: 1.0
 cfg_dropout: 0.1
-num_workers: 4
+num_workers: 8  # native-64px shards are small; more workers = higher stream throughput
 
 # resolution-shifted timestep sampling (img_size=64 > base 32)
 shifted_t: true
 
-# gradient checkpointing OFF — training is GPU-bound on the RAM cache and the 64px
-# model fits easily on an 80GB H100, so recomputation just wastes throughput/steps.
+# gradient checkpointing OFF — the 64px model fits easily on an 80GB H100, so
+# recomputation just wastes throughput/steps.
 checkpoint_every: 0
-
-# Pre-resized uint8 64px RAM cache (cache_data.py + CachedImageDataset). Built once
-# before the run timer from cache_shards parquet shards, then persisted on the volume.
-# This removes the HF-streaming data bottleneck → ~2.6× more optimizer steps per 600s
-# and deterministic, comparable runs. Takes precedence over `streaming` when set.
-cache_file: checkpoints/cache/in64_8sh.pt
-cache_shards: 8       # parquet shards to download for the cache
-cache_images: 200000  # images to keep in the cache
 
 # eval / sampling
 eval_interval: 1000
