@@ -1,0 +1,76 @@
+dataset: imagenet_256x256
+streaming: true
+img_size: 256
+channels: 3
+num_classes: 1000
+
+# model — patch_size 8 → 1024 tokens, ~200M params
+patch_size: 8
+hidden_dim: 512
+depth: 16
+num_heads: 16           # head_dim = 512 / 16 = 32
+
+# training — effective batch 1024 (64 × 16 accum)
+batch_size: 256
+grad_accum_steps: 4 # effective batch = batch_size × grad_accum_steps
+epochs: 100
+lr: 1e-4
+warmup_steps: 500
+ema_decay: 0.9999
+grad_clip: 1.0
+cfg_dropout: 0.1
+num_workers: 8
+
+# resolution-shifted timestep sampling (img_size=256 >> base 32, shift≈2.08)
+shifted_t: true
+
+# gradient checkpointing — every block; essential at 256px to keep activation memory in check
+checkpoint_every: 1
+
+# eval / sampling
+eval_interval: 2000
+n_sample_steps: 50
+cfg_scale: 3.0
+n_per_class: 2 # 2 rows × 50 cols (keep generation cost low at 256px)
+n_log_classes: 50
+fid_every_n_epochs: 1
+fid_samples: 10000
+
+# logging
+wandb_project: nano-diffusion
+run_name: imagenet256
+
+# device
+device: cuda
+
+# semantic routing — arxiv 2602.03510
+use_semantic_routing: false
+
+# REG — arxiv 2507.01467
+use_reg: true
+# reg_model_name: facebook/dinov2-base
+reg_beta: 0.05
+
+# TREAD: token routing for training efficiency (compvis/tread)
+# depth=16: blocks 2-12 see 50% of tokens; last 3 blocks see full sequence
+use_tread: true
+tread_selection_rate: 0.5
+tread_route_start: 2
+tread_route_end: 12
+
+# MaskGIT-style token dropout — removes patch tokens from the entire forward pass
+use_maskgit: false
+maskgit_ratio: 0.5
+
+# MoE FFN with Expert Choice routing
+use_moe: true
+moe_num_experts: 8 # total SwiGLU experts per MoE block
+moe_num_always_on: 1 # dense experts that see every token; rest are routed
+moe_capacity_factor: 1.25 # each routed expert's token budget (1.0 = fair share)
+moe_every_n: 2 # apply MoE to every Nth block; remaining blocks stay dense
+
+# GCS checkpoint upload (leave empty to disable)
+gcp_bucket: ""
+
+# torch.compile — disable if Triton/gcc fails on the target machine
+compile: true
