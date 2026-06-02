@@ -31,10 +31,15 @@ _CFGS = {
     "imagenet_256x256": dict(hf="benjamin-paine/imagenet-1k-256x256", img_key="image",
                              lbl_key="label", channels=3,
                              eval_split="validation", size=1281167),
+    # native 64×64 repack (Lanczos) — same 1.28M images but ~16× less stream bandwidth
+    # than downloading 256px and resizing, so streaming keeps the GPU fed at 64px.
+    "imagenet_64x64": dict(hf="benjamin-paine/imagenet-1k-64x64", img_key="image",
+                           lbl_key="label", channels=3,
+                           eval_split="validation", size=1281167),
 }
 # Resolution-specific aliases that map to the same HF dataset.
 # Allows `prepare_data.py imagenet64` to work when DATASET matches the config filename.
-_CFGS["imagenet64"]  = _CFGS["imagenet_256x256"]
+_CFGS["imagenet64"]  = _CFGS["imagenet_64x64"]
 _CFGS["imagenet256"] = _CFGS["imagenet_256x256"]
 
 
@@ -86,15 +91,36 @@ class StreamingImageDataset(torch.utils.data.IterableDataset):
         self.shuffle_buffer = shuffle_buffer
         self.transform      = _make_transform(cfg["channels"], img_size)
 
-    def __iter__(self):
-        worker      = torch.utils.data.get_worker_info()
-        ds          = load_dataset(self.hf_path, split=self.split, streaming=True)
+    def _stream(self, worker, attempt: int):
+        """Open a fresh HF stream. A new load_dataset builds a new httpx client,
+        which is the only way to recover after a connection-reset closes the old one."""
+        ds = load_dataset(self.hf_path, split=self.split, streaming=True)
         if self.shuffle_buffer > 0:
-            seed = worker.id if worker is not None else 0
-            ds   = ds.shuffle(buffer_size=self.shuffle_buffer, seed=seed)
+            base = worker.id if worker is not None else 0
+            # vary seed per attempt so a restart doesn't replay the identical prefix
+            ds = ds.shuffle(buffer_size=self.shuffle_buffer, seed=base + 1000 * attempt)
         it = iter(ds)
         if worker is not None:
             # Each worker takes every num_workers-th item starting at its own id
             it = itertools.islice(it, worker.id, None, worker.num_workers)
-        for item in it:
-            yield self.transform(item[self.img_key]), item[self.lbl_key]
+        return it
+
+    def __iter__(self):
+        worker  = torch.utils.data.get_worker_info()
+        attempt = 0
+        # HF streaming over flaky networks raises ConnectionReset / "client has been
+        # closed" mid-epoch and kills the worker. Restart the stream on any such error
+        # so training never dies on a transient hiccup (training-only; order is already
+        # shuffled so a restart just resamples).
+        while True:
+            it = self._stream(worker, attempt)
+            try:
+                for item in it:
+                    yield self.transform(item[self.img_key]), item[self.lbl_key]
+                return  # stream exhausted cleanly → epoch done
+            except Exception as e:  # noqa: BLE001 — deliberately broad: any I/O fault → reconnect
+                attempt += 1
+                if attempt > 100:
+                    raise
+                print(f"[stream w{getattr(worker, 'id', 0)}] reconnect #{attempt} after: "
+                      f"{type(e).__name__}: {e}", flush=True)

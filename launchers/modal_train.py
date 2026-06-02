@@ -35,6 +35,9 @@ CUDA_TAG = "cu126"  # update if your Modal GPU needs a different build
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    # gcc is required by Triton/Inductor (torch.compile) to build generated C code.
+    # debian_slim strips build tools by default so we add them back explicitly.
+    .apt_install("build-essential")
     # Install torch from the PyTorch wheel server only — prevents PyPI's generic
     # torch wheel (bundled with whatever CUDA it prefers) from winning on version.
     .pip_install(
@@ -62,7 +65,8 @@ image = (
     .add_local_dir(
         ROOT,
         remote_path="/app",
-        ignore=[".git", "__pycache__", "checkpoints", "launchers", "*.pt"],
+        ignore=[".git", "__pycache__", "checkpoints", "launchers", "*.pt",
+                "exp_logs", "*.log"],  # live-written logs must not race the build sync
     )
 )
 
@@ -80,7 +84,7 @@ hf_cache_vol = modal.Volume.from_name("nano-diffusion-hf-cache", create_if_missi
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
-    gpu="A100",
+    gpu="H100",
     timeout=60 * 60 * 12,  # 12 h — adjust to your run budget
     volumes={
         "/checkpoints": checkpoints_vol,

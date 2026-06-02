@@ -1,0 +1,80 @@
+# native 64×64 ImageNet (full 1.28M images) — streaming it is ~16× cheaper than
+# downloading 256px and resizing, so we keep full dataset diversity AND fast throughput.
+dataset: imagenet_64x64
+streaming: true
+img_size: 64
+channels: 3
+num_classes: 1000
+
+# model — patch_size 4 → 256 tokens, ~100M params
+patch_size: 4
+hidden_dim: 512
+depth: 16
+num_heads: 8
+
+# training — tuned for fast convergence in fixed 600s H100 runs.
+# Small batch (more optimizer steps) + high LR + no grad-checkpointing.
+batch_size: 256
+grad_accum_steps: 1 # effective batch = batch_size × grad_accum_steps
+epochs: 50
+lr: 8e-4
+warmup_steps: 100
+ema_decay: 0.9999
+grad_clip: 1.0
+cfg_dropout: 0.1
+num_workers: 8  # native-64px shards are small; more workers = higher stream throughput
+
+# resolution-shifted timestep sampling (img_size=64 > base 32)
+shifted_t: true
+
+# gradient checkpointing OFF — the 64px model fits easily on an 80GB H100, so
+# recomputation just wastes throughput/steps.
+checkpoint_every: 0
+
+# eval / sampling
+eval_interval: 1000
+n_sample_steps: 50
+cfg_scale: 3.0
+n_per_class: 4 # 4 rows × 50 cols in the wandb grid
+n_log_classes: 50
+fid_every_n_epochs: 5
+fid_samples: 5000
+
+# logging
+wandb_project: nano-diffusion
+run_name: imagenet64
+
+# device
+device: cuda
+
+# semantic routing — arxiv 2602.03510
+use_semantic_routing: false
+
+# REG — arxiv 2507.01467
+use_reg: true
+# reg_model_name: facebook/dinov2-base
+reg_beta: 0.03
+
+# TREAD: token routing for training efficiency (compvis/tread)
+# depth=12: blocks 2-8 see 50% of tokens; last 3 blocks see full sequence
+use_tread: true
+tread_selection_rate: 0.5
+tread_route_start: 2
+tread_route_end: 8
+
+# MaskGIT-style token dropout — removes patch tokens from the entire forward pass
+use_maskgit: false
+maskgit_ratio: 0.25
+
+# MoE FFN with Expert Choice routing
+use_moe: false
+moe_num_experts: 8 # total SwiGLU experts per MoE block
+moe_num_always_on: 2 # dense experts that see every token; rest are routed
+moe_capacity_factor: 1.25 # each routed expert's token budget (1.0 = fair share)
+moe_every_n: 2 # apply MoE to every Nth block; remaining blocks stay dense
+
+# GCS checkpoint upload (leave empty to disable)
+gcp_bucket: ""
+
+# torch.compile — disable if Triton/gcc fails on the target machine
+compile: true

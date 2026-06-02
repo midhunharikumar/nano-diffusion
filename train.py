@@ -245,7 +245,8 @@ def main():
         loader = DataLoader(
             dataset, batch_size=cfg.batch_size, shuffle=False,
             num_workers=nw, pin_memory=False, drop_last=True,
-            persistent_workers=(nw > 0),
+            persistent_workers=False,   # HF streaming workers can't be safely persisted;
+            prefetch_factor=2 if nw > 0 else None,  # keep next batch ready
         )
         ds_size = _CFGS[cfg.dataset].get("size")
         epoch_len = getattr(
@@ -425,9 +426,11 @@ def main():
             update_ema(ema, model, cfg.ema_decay, step)
             step += 1
 
-            # runtime limit — compute FID, save checkpoint, and exit cleanly
+            # runtime limit — sample, compute FID, save checkpoint, and exit cleanly
             if args.max_runtime and (time.time() - t_start) >= args.max_runtime:
-                print(f"  max_runtime {args.max_runtime}s reached at step {step} — computing FID")
+                print(f"  max_runtime {args.max_runtime}s reached at step {step} — sampling")
+                log_samples(ema, cfg, device, step, run, tokenizer=tokenizer)
+                print(f"  computing FID")
                 fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples, tokenizer=tokenizer)
                 run.log({"fid": fid}, step=step)
                 print(f"  FID: {fid:.2f}")
@@ -502,6 +505,30 @@ def main():
             )
             if gcs:
                 gcs.upload(ckpt_path)
+
+    # Final eval — always run at the end of training if the last epoch didn't
+    # already trigger a scheduled FID (i.e. epochs % fid_every_n_epochs != 0)
+    is_final_epoch = cfg.epochs % cfg.fid_every_n_epochs != 0
+    if is_final_epoch:
+        print("→ final eval")
+        log_samples(ema, cfg, device, step, run)
+        fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples)
+        run.log({"fid": fid}, step=step)
+        print(f"  FID: {fid:.2f}")
+        ckpt_path = f"checkpoints/{run_name}_step{step:07d}_fid{fid:.2f}_final.pt"
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "ema": ema.state_dict(),
+                "opt": opt.state_dict(),
+                "step": step,
+                "fid": fid,
+                "cfg": OmegaConf.to_container(cfg, resolve=True),
+            },
+            ckpt_path,
+        )
+        if gcs:
+            gcs.upload(ckpt_path)
 
     run.finish()
 

@@ -40,7 +40,6 @@ class REGEncoder(nn.Module):
         x : (B, C, H, W) float32 in [-1, 1]
         Returns (B, hidden_size) — the DINOv2 [CLS] token for each image.
         """
-        print(x.max(), x.min())
         x = (x + 1.0) / 2.0  # [-1,1] → [0,1]
         x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
         if x.shape[1] == 1:  # grayscale → RGB
