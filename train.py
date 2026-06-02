@@ -27,6 +27,7 @@ from eval import compute_fid
 from gcs import GCSCheckpointUploader
 from model import DiT
 from sample import log_samples
+from tokenizer import build_tokenizer, model_dims
 
 # ---------------------------------------------------------------------------
 # Flow matching
@@ -79,6 +80,9 @@ def compute_loss(
     use_reg: bool = False,
     reg_beta: float = 0.03,
     shifted_t: bool = False,
+    code_targets=None,
+    code_ce_beta: float = 0.1,
+    mse_weight: float = 1.0,
 ):
     null = model.cls_embed.num_embeddings - 1
     drop = torch.rand(len(labels), device=labels.device) < cfg_dropout
@@ -113,7 +117,7 @@ def compute_loss(
             sem_token[drop] = torch.randn_like(sem_token[drop])
 
     result = model(zt, t, labels_in, texts=texts_in, sem_token=sem_token)
-    x0_pred, cls0_pred, ids_keep = result
+    x0_pred, cls0_pred, ids_keep, code_logits = result
 
     if ids_keep is not None:
         # MaskGIT active: x0_pred is (B, n_keep, patch_dim); compute loss in patch space
@@ -136,8 +140,32 @@ def compute_loss(
     if sem_token is not None:
         aux_loss = reg_beta * (cls0_pred - cls_0).pow(2).mean()
 
-    total_loss = img_loss + aux_loss if aux_loss is not None else img_loss
-    return total_loss, img_loss, aux_loss
+    # Codebook cross-entropy: factorised per-FSQ-dim classification of the clean
+    # latent's discrete code. Weighted by t (=1 is clean data here) so the term
+    # only bites where the x0 prediction is reliable — at high noise the
+    # predicted code is ambiguous and would just inject noise.
+    ce_loss = None
+    if code_logits is not None and code_targets is not None:
+        raw = getattr(model, "_orig_mod", model)
+        levels = raw.fsq_levels
+        w_t = t.view(-1)                              # (B,), emphasise low-noise
+        offset = 0
+        ce = 0.0
+        for d, L in enumerate(levels):
+            logits_d = code_logits[:, offset:offset + L]      # (B, L, H, W)
+            offset += L
+            ce_d = F.cross_entropy(logits_d, code_targets[:, d], reduction="none")
+            ce = ce + (w_t * ce_d.mean(dim=(1, 2))).mean()    # mean over space, t-weight, batch
+        ce_loss = code_ce_beta * ce / len(levels)
+
+    # mse_weight=0 → CE-only ablation (the regression head gets no gradient;
+    # sampling is driven by the classification head via ce_output).
+    total_loss = mse_weight * img_loss
+    if aux_loss is not None:
+        total_loss = total_loss + aux_loss
+    if ce_loss is not None:
+        total_loss = total_loss + ce_loss
+    return total_loss, img_loss, aux_loss, ce_loss
 
 
 # ---------------------------------------------------------------------------
@@ -236,13 +264,37 @@ def main():
         )
         epoch_len = len(loader)
 
+    # Cosmos tokenizer (optional): train the DiT in compressed latent space.
+    # When enabled the DiT operates on latent grids, not pixels — encode each
+    # batch to latents before the loss and decode latents back for sampling/FID.
+    use_reg = getattr(cfg, "use_reg", False)
+    use_tokenizer = getattr(cfg, "use_tokenizer", False)
+    assert not (use_tokenizer and use_reg), (
+        "use_tokenizer and use_reg are not supported together: REG extracts "
+        "DINOv2 features from pixel images, but tokenizer mode trains on latents."
+    )
+    tokenizer = build_tokenizer(cfg, device)
+    model_channels, model_img_size = model_dims(cfg)
+
+    # Codebook cross-entropy: auxiliary classification of the tokenizer's FSQ
+    # codes (requires a discrete DI tokenizer that exposes a codebook).
+    use_codebook_ce = getattr(cfg, "use_codebook_ce", False)
+    if use_codebook_ce:
+        from tokenizer import fsq_levels as _fsq_levels
+        assert tokenizer is not None and tokenizer.is_discrete, (
+            "use_codebook_ce requires a discrete DI tokenizer "
+            "(e.g. tokenizer_name=Cosmos-0.1-Tokenizer-DI8x8)"
+        )
+        fsq = _fsq_levels(cfg.tokenizer_name)
+    else:
+        fsq = None
+
     # model + EMA
     use_routing = getattr(cfg, "use_semantic_routing", False)
-    use_reg = getattr(cfg, "use_reg", False)
     model = DiT(
-        img_size=cfg.img_size,
+        img_size=model_img_size,
         patch_size=cfg.patch_size,
-        channels=cfg.channels,
+        channels=model_channels,
         num_classes=cfg.num_classes,
         d=cfg.hidden_dim,
         depth=cfg.depth,
@@ -263,6 +315,9 @@ def main():
         moe_num_always_on=getattr(cfg, "moe_num_always_on", 1),
         moe_capacity_factor=getattr(cfg, "moe_capacity_factor", 1.25),
         moe_every_n=getattr(cfg, "moe_every_n", 1),
+        use_codebook_ce=use_codebook_ce,
+        fsq_levels=fsq,
+        ce_output=getattr(cfg, "ce_output", False),
     ).to(device)
     ema = make_ema(model)
     print(f"parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
@@ -309,8 +364,8 @@ def main():
     for epoch in epoch_bar:
         model.train()
         # accumulators reset each optimizer step
-        accum_loss = accum_img_loss = accum_aux_loss = 0.0
-        accum_aux_active = False
+        accum_loss = accum_img_loss = accum_aux_loss = accum_ce_loss = 0.0
+        accum_aux_active = accum_ce_active = False
 
         batch_bar = tqdm(
             loader, desc=f"epoch {epoch + 1:>{len(str(cfg.epochs))}}/{cfg.epochs}",
@@ -318,6 +373,12 @@ def main():
         )
         for i, (x, labels) in enumerate(batch_bar):
             x, labels = x.to(device), labels.to(device)
+            code_targets = None
+            if tokenizer is not None:
+                if use_codebook_ce:
+                    x, code_targets = tokenizer.encode_with_targets(x)
+                else:
+                    x = tokenizer.encode(x)   # pixels [-1,1] → frozen latents
 
             texts = [class_texts[i] for i in labels.tolist()] if class_texts else None
             with torch.autocast(
@@ -325,7 +386,7 @@ def main():
                 dtype=torch.bfloat16,
                 enabled=(device.type in ("cuda", "cpu")),
             ):
-                loss, img_loss, aux_loss = compute_loss(
+                loss, img_loss, aux_loss, ce_loss = compute_loss(
                     model,
                     x,
                     labels,
@@ -334,6 +395,9 @@ def main():
                     use_reg=use_reg,
                     reg_beta=getattr(cfg, "reg_beta", 0.03),
                     shifted_t=getattr(cfg, "shifted_t", False),
+                    code_targets=code_targets,
+                    code_ce_beta=getattr(cfg, "code_ce_beta", 0.1),
+                    mse_weight=getattr(cfg, "mse_weight", 1.0),
                 )
             (loss / grad_accum).backward()
 
@@ -342,6 +406,9 @@ def main():
             if aux_loss is not None:
                 accum_aux_loss += aux_loss.item()
                 accum_aux_active = True
+            if ce_loss is not None:
+                accum_ce_loss += ce_loss.item()
+                accum_ce_active = True
 
             # optimizer update at the end of each accumulation window
             end_of_window = (i + 1) % grad_accum == 0 or (i + 1) == epoch_len
@@ -361,7 +428,7 @@ def main():
             # runtime limit — compute FID, save checkpoint, and exit cleanly
             if args.max_runtime and (time.time() - t_start) >= args.max_runtime:
                 print(f"  max_runtime {args.max_runtime}s reached at step {step} — computing FID")
-                fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples)
+                fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples, tokenizer=tokenizer)
                 run.log({"fid": fid}, step=step)
                 print(f"  FID: {fid:.2f}")
                 ckpt_path = f"checkpoints/{run_name}_step{step:07d}_fid{fid:.2f}_timeout.pt"
@@ -388,9 +455,12 @@ def main():
                 "lr": scheduler.get_last_lr()[0],
                 "epoch": epoch + 1,
             }
-            if accum_aux_active:
+            if accum_aux_active or accum_ce_active:
                 log["loss/img"] = accum_img_loss / batches_in_window
+            if accum_aux_active:
                 log["loss/aux"] = accum_aux_loss / batches_in_window
+            if accum_ce_active:
+                log["loss/ce"] = accum_ce_loss / batches_in_window
             run.log(log, step=step)
 
             # update inner bar postfix after every optimizer step
@@ -399,20 +469,23 @@ def main():
             if accum_aux_active:
                 pf["img"] = f"{log['loss/img']:.4f}"
                 pf["aux"] = f"{log['loss/aux']:.4f}"
+            if accum_ce_active:
+                pf["img"] = f"{log['loss/img']:.4f}"
+                pf["ce"] = f"{log['loss/ce']:.4f}"
             batch_bar.set_postfix(pf)
 
-            accum_loss = accum_img_loss = accum_aux_loss = 0.0
-            accum_aux_active = False
+            accum_loss = accum_img_loss = accum_aux_loss = accum_ce_loss = 0.0
+            accum_aux_active = accum_ce_active = False
 
             if step % cfg.eval_interval == 0:
-                log_samples(ema, cfg, device, step, run)
+                log_samples(ema, cfg, device, step, run, tokenizer=tokenizer)
 
         batch_bar.close()
         last_loss = log["loss"]
         epoch_bar.set_postfix({"loss": f"{last_loss:.4f}", "step": step})
 
         if (epoch + 1) % cfg.fid_every_n_epochs == 0:
-            fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples)
+            fid = compute_fid(ema, cfg, device, n_samples=cfg.fid_samples, tokenizer=tokenizer)
             run.log({"fid": fid}, step=step)
             print(f"  FID: {fid:.2f}")
             ckpt_path = f"checkpoints/{run_name}_step{step:07d}_fid{fid:.2f}.pt"

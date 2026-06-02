@@ -21,3 +21,7 @@ sentencepiece>=0.2.0
 protobuf>=3.20.0
 accelerate>=0.34.0
 google-cloud-storage
+
+# Cosmos tokenizer (NVIDIA) — only needed when use_tokenizer=true. Not on PyPI;
+# installed straight from GitHub. Pulls a few extra deps (mediapy, loguru, etc.).
+cosmos-tokenizer @ git+https://github.com/NVIDIA/Cosmos-Tokenizer.git

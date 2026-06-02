@@ -55,6 +55,9 @@ image = (
         "accelerate",
         "google-cloud-storage",
     )
+    # Cosmos tokenizer (only used when use_tokenizer=true); not on PyPI.
+    .apt_install("git")
+    .pip_install("cosmos-tokenizer @ git+https://github.com/NVIDIA/Cosmos-Tokenizer.git")
     # add_local_dir syncs at run time (no image rebuild needed on code changes)
     .add_local_dir(
         ROOT,
@@ -109,6 +112,9 @@ def train(
     if not os.path.exists("checkpoints"):
         os.symlink("/checkpoints", "checkpoints")
 
+    # cache Cosmos tokenizer .jit checkpoints on the persistent HF volume
+    os.environ.setdefault("COSMOS_CACHE_DIR", "/root/.cache/huggingface/cosmos")
+
     # materialise GCP service-account key from the Modal secret env var
     creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "")
     if creds_json:
@@ -131,6 +137,37 @@ def train(
 
 
 # ---------------------------------------------------------------------------
+# Tokenizer reconstruction check (no diffusion model)
+# ---------------------------------------------------------------------------
+@app.function(
+    image=image,
+    gpu="A100",
+    timeout=60 * 30,
+    volumes={
+        "/checkpoints": checkpoints_vol,
+        "/root/.cache/huggingface": hf_cache_vol,
+    },
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+)
+def recon(dataset: str = "imagenet256_cosmos_di", n: int = 16):
+    import os
+    import subprocess
+    import sys
+
+    os.chdir("/app")
+    if not os.path.exists("checkpoints"):
+        os.symlink("/checkpoints", "checkpoints")
+    os.environ.setdefault("COSMOS_CACHE_DIR", "/root/.cache/huggingface/cosmos")
+
+    subprocess.run(
+        [sys.executable, "recon.py", f"configs/{dataset}.yaml", "--n", str(n),
+         "--out", f"checkpoints/recon_{dataset}.png"],
+        check=True,
+    )
+    checkpoints_vol.commit()  # persist the comparison PNG
+
+
+# ---------------------------------------------------------------------------
 # Local entry point
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
@@ -148,3 +185,7 @@ def main(
         max_runtime=max_runtime,
         gcp_bucket=gcp_bucket,
     )
+
+# Tokenizer reconstruction check (no extra entrypoint, so bare `modal run
+# launchers/modal_train.py` still defaults to training):
+#   modal run launchers/modal_train.py::recon --dataset imagenet256_cosmos_di --n 16

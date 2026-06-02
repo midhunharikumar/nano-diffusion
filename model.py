@@ -257,6 +257,12 @@ class DiT(nn.Module):
         moe_num_always_on:    int   = 1,     # always-on (dense) experts; rest are routed
         moe_capacity_factor:  float = 1.25,  # each routed expert's token budget vs fair share
         moe_every_n:          int   = 1,     # replace FFN with MoE every Nth block (1 = all)
+        # Codebook cross-entropy: auxiliary classification head predicting the
+        # tokenizer's discrete FSQ levels from the patch features (arxiv 2501.03575
+        # tokenizer; mixed continuous-diffusion + discrete-code objective).
+        use_codebook_ce:      bool  = False,
+        fsq_levels:    list[int] | None = None,  # per-dim FSQ level counts
+        ce_output:            bool  = False,  # CE-only ablation: x0 from argmax(code logits)
     ):
         super().__init__()
         assert d % heads == 0, (
@@ -341,16 +347,35 @@ class DiT(nn.Module):
         self.use_maskgit   = use_maskgit
         self.maskgit_ratio = maskgit_ratio
 
+        # Codebook CE: parallel head mapping each patch token to per-FSQ-dim level
+        # logits for every latent position it covers. Zero-init → starts silent.
+        self.use_codebook_ce = use_codebook_ce
+        self.fsq_levels      = list(fsq_levels) if fsq_levels else None
+        # CE-only ablation: drive sampling from the classification head (argmax →
+        # per-dim level → code value) instead of the regression head.
+        self.ce_output       = ce_output
+        if use_codebook_ce:
+            assert not use_maskgit, "codebook CE not supported with MaskGIT (patch-space output)"
+            assert self.fsq_levels, "use_codebook_ce requires fsq_levels"
+            self.code_head = nn.Linear(d, patch_size * patch_size * sum(self.fsq_levels))
+            nn.init.zeros_(self.code_head.weight)
+            nn.init.zeros_(self.code_head.bias)
+        else:
+            assert not ce_output, "ce_output requires use_codebook_ce"
+            self.code_head = None
+
     def forward(self, x, t, labels, texts: list[str] | None = None, sem_token=None):
         """
         labels    : (B,) int class indices — always used for AdaLN timestep+class cond.
         texts     : list of B strings — activates semantic routing cross-attention.
         sem_token : (B, reg_hidden_size) noised DINOv2 CLS token for REG, or None.
 
-        Always returns (x0_pred, cls0_pred, maskgit_ids_keep).
+        Always returns (x0_pred, cls0_pred, maskgit_ids_keep, code_logits).
         cls0_pred is None when REG is inactive.
         maskgit_ids_keep is None at inference or when use_maskgit=False; when not None,
         x0_pred is in patch token space (B, n_keep, patch_dim) instead of image space.
+        code_logits is None unless the codebook-CE head is active (training only);
+        when set it is (B, sum(fsq_levels), H, W) — per-position per-dim level logits.
         """
         p = self.patch_size
         x = rearrange(x, "b c (h p1) (w p2) -> b (h w) (c p1 p2)", p1=p, p2=p)
@@ -438,4 +463,34 @@ class DiT(nn.Module):
             # Masked training: return patch-space predictions; caller computes loss directly
             x0_pred = img_out  # (B, n_keep, patch_dim)
 
-        return x0_pred, cls0_pred, maskgit_ids_keep
+        # Codebook-CE head. Computed in training (for the CE loss) and also at
+        # inference when ce_output is set (so sampling can be driven by it).
+        # MaskGIT excluded so the full grid is present; reg_active is incompatible
+        # with the tokenizer, so x has no semantic token here.
+        code_logits = None
+        if self.code_head is not None and (self.training or self.ce_output) and maskgit_ids_keep is None:
+            h = w = self.img_size // p
+            L = sum(self.fsq_levels)
+            code_logits = rearrange(self.code_head(x),
+                                    "b (h w) (L p1 p2) -> b L (h p1) (w p2)",
+                                    h=h, w=w, p1=p, p2=p, L=L)
+            # CE-only ablation at sampling: replace the (untrained) regression
+            # output with codes decoded from the argmax of the level logits.
+            if self.ce_output and not self.training:
+                x0_pred = self._codes_from_logits(code_logits)
+
+        return x0_pred, cls0_pred, maskgit_ids_keep, code_logits
+
+    def _codes_from_logits(self, code_logits):
+        """argmax per-FSQ-dim level logits → normalised code values (B, n_dims, H, W).
+
+        Inverts FSQ _scale_and_shift: code = (level - half_width) / half_width,
+        matching the encoder's `codes` space (assumes identity latent_scale/shift).
+        """
+        codes, offset = [], 0
+        for L in self.fsq_levels:
+            level = code_logits[:, offset:offset + L].argmax(dim=1)  # (B, H, W)
+            offset += L
+            half = L // 2
+            codes.append((level.float() - half) / half)
+        return torch.stack(codes, dim=1)

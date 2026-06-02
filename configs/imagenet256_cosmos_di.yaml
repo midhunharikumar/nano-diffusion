@@ -1,0 +1,68 @@
+dataset: imagenet_256x256
+streaming: true
+steps_per_epoch: 5000
+img_size: 256
+channels: 6        # informational; DiT uses len(fsq_levels) in tokenizer mode
+num_classes: 1000
+
+# Cosmos DISCRETE tokenizer — exposes both the continuous pre-quant codes
+# (diffusion target) and the FSQ codebook indices (cross-entropy target).
+# DI8x8 compresses 256px → 32×32 latent grid with 6 FSQ channels.
+use_tokenizer: true
+tokenizer_name: Cosmos-0.1-Tokenizer-DI8x8
+latent_scale: 1.0
+latent_shift: 0.0
+
+# Mixed objective: diffusion MSE on continuous codes + factorised cross-entropy
+# on the discrete FSQ levels (arxiv 2501.03575 tokenizer). Small beta → aux
+# regulariser, not a co-equal objective.
+use_codebook_ce: true
+code_ce_beta: 0.1
+# Ablation knobs (override on the CLI):
+#   MSE+CE (default): use_codebook_ce=true  mse_weight=1.0 ce_output=false
+#   MSE-only:         use_codebook_ce=false
+#   CE-only:          mse_weight=0.0 ce_output=true code_ce_beta=1.0
+mse_weight: 1.0
+ce_output: false
+
+# model — latent grid 32×32×6; patch_size=2 → 256 tokens
+patch_size: 2
+hidden_dim: 768
+depth: 12
+num_heads: 8
+
+# training
+batch_size: 256
+grad_accum_steps: 1   # effective batch = batch_size × grad_accum_steps
+shifted_t: false
+epochs: 50
+lr: 8e-4
+warmup_steps: 100
+ema_decay: 0.9999
+grad_clip: 1.0
+cfg_dropout: 0.1
+num_workers: 8
+
+checkpoint_every: 0
+
+# eval / sampling
+eval_interval: 500
+n_sample_steps: 50
+cfg_scale: 3.0
+n_per_class: 8
+n_log_classes: 10
+fid_every_n_epochs: 5
+fid_samples: 2048
+
+# logging
+wandb_project: nano-diffusion
+run_name: imagenet256-cosmos-di
+
+# device
+device: cuda
+
+use_semantic_routing: false
+use_reg: false       # incompatible with tokenizer mode
+
+gcp_bucket: ""
+compile: true

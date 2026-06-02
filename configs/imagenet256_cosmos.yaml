@@ -1,0 +1,62 @@
+dataset: imagenet_256x256
+streaming: true
+steps_per_epoch: 5000
+img_size: 256
+channels: 3        # pixel channels (dataset / decoded images); ignored by the DiT in tokenizer mode
+num_classes: 1000
+
+# Cosmos tokenizer — train in latent space instead of pixels (arxiv 2501.03575).
+# CI8x8 compresses 256px → 32×32 latent grid with 4 channels.
+use_tokenizer: true
+tokenizer_name: Cosmos-0.1-Tokenizer-CI8x8
+# Estimate per-dataset values with: python tokenizer.py configs/imagenet256_cosmos.yaml
+# (normalises latents toward unit variance so flow-matching noise is well scaled)
+latent_scale: 1.0
+latent_shift: 0.0
+
+# model — latent grid is 32×32×4; patch_size=2 → 256 tokens
+patch_size: 2
+hidden_dim: 768
+depth: 12
+num_heads: 8
+
+# training
+batch_size: 128
+grad_accum_steps: 1
+shifted_t: false   # latents are already low-resolution; resolution shift is a no-op here
+epochs: 100
+lr: 1e-4
+ema_decay: 0.9999
+grad_clip: 1.0
+cfg_dropout: 0.1
+num_workers: 8
+
+# no gradient checkpointing needed — latent sequence is short (256 tokens)
+checkpoint_every: 0
+
+# eval / sampling
+eval_interval: 500
+n_sample_steps: 50
+cfg_scale: 3.0
+n_per_class: 8
+n_log_classes: 10  # cap the sample grid width for 1000-class ImageNet
+fid_every_n_epochs: 5
+fid_samples: 2048
+
+# logging
+wandb_project: nano-diffusion
+run_name: imagenet256-cosmos
+
+# device
+device: cuda
+
+use_semantic_routing: false
+
+# REG is incompatible with tokenizer mode (DINOv2 needs pixel images)
+use_reg: false
+
+# GCS checkpoint upload (leave empty to disable)
+gcp_bucket: ""
+
+# torch.compile — disable if Triton/gcc fails on the target machine
+compile: true
