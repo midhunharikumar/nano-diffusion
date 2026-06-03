@@ -23,6 +23,7 @@ set -euo pipefail
 UV_VENV_CLEAR="${UV_VENV_CLEAR:-1}"
 PI_HOST="${PI_HOST:-ubuntu@204.52.29.118}"
 REMOTE_DIR="/ephemeral/nano-diffusion"    # fast NVMe scratch — wiped on instance termination
+REMOTE_CACHE="/ephemeral/.cache"          # all package/model caches live on NVMe, not the small root disk
 DATASET="${DATASET:-imagenet64}"
 OVERRIDES="${OVERRIDES:-}"
 MAX_RUNTIME="${MAX_RUNTIME:-}"            # optional: stop after N seconds
@@ -77,6 +78,12 @@ ssh "$PI_HOST" "
     set -e
     export PATH=\"\$HOME/.local/bin:\$PATH\"
 
+    # keep all package caches on NVMe — the root disk is small and fills up fast
+    mkdir -p $REMOTE_CACHE/uv $REMOTE_CACHE/pip
+    export XDG_CACHE_HOME=$REMOTE_CACHE
+    export UV_CACHE_DIR=$REMOTE_CACHE/uv
+    export PIP_CACHE_DIR=$REMOTE_CACHE/pip
+
     # install uv if not present
     if ! command -v uv &>/dev/null; then
         mkdir -p \"\$HOME/.config/uv\" 2>/dev/null || true
@@ -98,8 +105,8 @@ ssh "$PI_HOST" "
 
     # Step 2: everything else via uv (faster); skip torch lines so uv never
     # tries to re-resolve them against PyPI.
-    grep -vE '^torch(vision)?(==|>=|<=|~=|!=| |$)' requirements.txt > /tmp/reqs_no_torch.txt
-    uv pip install --quiet -r /tmp/reqs_no_torch.txt
+    grep -vE '^torch(vision)?(==|>=|<=|~=|!=| |$)' requirements.txt > $REMOTE_DIR/.reqs_no_torch.txt
+    uv pip install --quiet -r $REMOTE_DIR/.reqs_no_torch.txt
 "
 
 # ── 3. write env file (avoids key appearing in ps aux) ───────────────────────
@@ -108,8 +115,16 @@ ssh "$PI_HOST" "
     echo 'export WANDB_API_KEY=$WANDB_API_KEY'                                           > $REMOTE_DIR/.env
     echo 'export HF_TOKEN=$HF_TOKEN'                                                    >> $REMOTE_DIR/.env
     echo 'export HF_XET_HIGH_PERFORMANCE=1'                                             >> $REMOTE_DIR/.env
-    echo 'export HF_DATASETS_CACHE=/ephemeral/.cache/huggingface/datasets'              >> $REMOTE_DIR/.env
-    echo 'export HF_HOME=/ephemeral/.cache/huggingface'                                 >> $REMOTE_DIR/.env
+    echo 'export HF_DATASETS_CACHE=$REMOTE_CACHE/huggingface/datasets'                  >> $REMOTE_DIR/.env
+    echo 'export HF_HOME=$REMOTE_CACHE/huggingface'                                     >> $REMOTE_DIR/.env
+    # Cosmos tokenizer weights (tokenizer.py reads COSMOS_CACHE_DIR) + torch/triton
+    # compile caches + uv/pip — keep every cache on NVMe, never the small root disk.
+    echo 'export COSMOS_CACHE_DIR=$REMOTE_CACHE/huggingface/cosmos'                      >> $REMOTE_DIR/.env
+    echo 'export XDG_CACHE_HOME=$REMOTE_CACHE'                                           >> $REMOTE_DIR/.env
+    echo 'export UV_CACHE_DIR=$REMOTE_CACHE/uv'                                          >> $REMOTE_DIR/.env
+    echo 'export PIP_CACHE_DIR=$REMOTE_CACHE/pip'                                        >> $REMOTE_DIR/.env
+    echo 'export TORCH_HOME=$REMOTE_CACHE/torch'                                         >> $REMOTE_DIR/.env
+    echo 'export TRITON_CACHE_DIR=$REMOTE_CACHE/triton'                                  >> $REMOTE_DIR/.env
     [[ -n '$GCP_CREDENTIALS_FILE' ]] && \
         echo 'export GOOGLE_APPLICATION_CREDENTIALS=~/.gcp/credentials.json'            >> $REMOTE_DIR/.env
 "
