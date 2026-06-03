@@ -5,6 +5,7 @@ img_size: 256
 channels: 6        # informational; DiT uses len(fsq_levels) in tokenizer mode
 num_classes: 1000
 
+# Best cosmos-DI recipe + TREAD.
 # Cosmos DISCRETE tokenizer — exposes both the continuous pre-quant codes
 # (diffusion target) and the FSQ codebook indices (cross-entropy target).
 # DI8x8 compresses 256px → 32×32 latent grid with 6 FSQ channels.
@@ -18,10 +19,6 @@ latent_shift: 0.0
 # regulariser, not a co-equal objective.
 use_codebook_ce: true
 code_ce_beta: 0.1
-# Ablation knobs (override on the CLI):
-#   MSE+CE (default): use_codebook_ce=true  mse_weight=1.0 ce_output=false
-#   MSE-only:         use_codebook_ce=false
-#   CE-only:          mse_weight=0.0 ce_output=true code_ce_beta=1.0
 mse_weight: 1.0
 ce_output: false
 
@@ -31,7 +28,8 @@ hidden_dim: 768
 depth: 12
 num_heads: 8
 
-# training
+# training — levers proven on imagenet64 (RESULTS.md): small batch + high LR +
+# short warmup + no grad checkpointing maximise optimizer steps in the 600s budget.
 batch_size: 256
 grad_accum_steps: 1   # effective batch = batch_size × grad_accum_steps
 shifted_t: false
@@ -56,7 +54,7 @@ fid_samples: 2048
 
 # logging
 wandb_project: nano-diffusion
-run_name: imagenet256-cosmos-di
+run_name: imagenet256-cosmos-di-tread
 
 # device
 device: cuda
@@ -67,7 +65,8 @@ use_reg: false       # incompatible with tokenizer mode
 # TREAD: token routing for training efficiency (compvis/tread).
 # Training-only — teleported tokens re-enter before norm_out, so the full 32×32
 # latent grid is present for both the diffusion regression and codebook-CE heads.
-# depth=12 → route through blocks 2..8 (six bypassed blocks).
+# depth=12 → route through blocks 2..8 (six bypassed blocks); ~half the patch
+# tokens skip those blocks each step → more optimizer steps in the 600s budget.
 use_tread: true
 tread_selection_rate: 0.5
 tread_route_start: 2

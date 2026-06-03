@@ -55,6 +55,14 @@ use_semantic_routing: false
 # REG is incompatible with tokenizer mode (DINOv2 needs pixel images)
 use_reg: false
 
+# TREAD: token routing for training efficiency (compvis/tread).
+# Training-only — teleported tokens re-enter before norm_out, so the full 32×32
+# latent grid is reconstructed for the output head. depth=12 → route blocks 2..8.
+use_tread: true
+tread_selection_rate: 0.5
+tread_route_start: 2
+tread_route_end: 8
+
 # GCS checkpoint upload (leave empty to disable)
 gcp_bucket: ""
 
